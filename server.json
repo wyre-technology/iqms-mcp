@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.wyre-technology/iqms-mcp",
   "title": "IQMS / DELMIA Apriso",
-  "description": "MCP server for IQMS (DELMIA Apriso) ERP \u2014 manufacturing operations, inventory, production, and quality data.",
+  "description": "MCP server for IQMS (DELMIAworks) ERP — manufacturing, inventory, production, and quality.",
   "repository": {
     "url": "https://github.com/wyre-technology/iqms-mcp",
     "source": "github"
