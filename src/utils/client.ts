@@ -98,9 +98,13 @@ export function getCredentials(): Credentials | null {
 const _clientCache = new Map<string, IqmsClient>();
 
 function credentialKey(creds: Credentials): string {
+  // Use arrays (not '@'-joined strings) so field boundaries are unambiguous —
+  // this is a tenant-isolation key, so it must be collision-free even if a
+  // value happens to contain the separator. Passwords are intentionally
+  // excluded (used at pool creation, not for cache identity).
   return JSON.stringify({
-    o: `${creds.oracle.user}@${creds.oracle.connectString}`,
-    w: creds.webapi ? `${creds.webapi.username}@${creds.webapi.baseUrl}` : '',
+    o: [creds.oracle.user, creds.oracle.connectString],
+    w: creds.webapi ? [creds.webapi.username, creds.webapi.baseUrl] : null,
   });
 }
 
