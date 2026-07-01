@@ -17,3 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   module is not licensed.
 - Stdio transport (local plugin mode) and Streamable HTTP transport (gateway mode)
   with per-request server lifecycle.
+
+### Fixed
+- `/health` liveness endpoint now returns an unconditional `200` instead of `503`
+  when no credentials are present. An Azure Container Apps liveness probe carries
+  no credentials, so the previous credential-gated status code caused the
+  container to crash-loop. Credential detail is retained in the response body
+  (`status`, `credentials`) for diagnostics only.
