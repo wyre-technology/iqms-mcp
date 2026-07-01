@@ -1,17 +1,53 @@
 import { createServer as createHttpServer } from 'node:http';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createServer } from './server.js';
-import { getCredentials, resetClient } from './utils/client.js';
+import { getCredentials, runWithCredentials } from './utils/client.js';
+import type { Credentials } from './utils/client.js';
 import { logger } from './utils/logger.js';
 
-const HEADER_TO_ENV: Record<string, string> = {
-  'x-iqms-oracle-user': 'IQMS_ORACLE_USER',
-  'x-iqms-oracle-password': 'IQMS_ORACLE_PASSWORD',
-  'x-iqms-oracle-connect-string': 'IQMS_ORACLE_CONNECT_STRING',
-  'x-iqms-webapi-base-url': 'IQMS_WEBAPI_BASE_URL',
-  'x-iqms-webapi-user': 'IQMS_WEBAPI_USER',
-  'x-iqms-webapi-password': 'IQMS_WEBAPI_PASSWORD',
-};
+// Map of incoming request header names to their corresponding Credentials fields.
+// The six fields cover every secret needed to reach Oracle and the WebAPI module.
+// These are READ from headers and passed into runWithCredentials() — process.env
+// is NEVER mutated in the request path.
+const HEADER_FIELDS = {
+  'x-iqms-oracle-user': 'oracleUser',
+  'x-iqms-oracle-password': 'oraclePassword',
+  'x-iqms-oracle-connect-string': 'oracleConnectString',
+  'x-iqms-webapi-base-url': 'webapiBaseUrl',
+  'x-iqms-webapi-user': 'webapiUser',
+  'x-iqms-webapi-password': 'webapiPassword',
+} as const;
+
+/** Extract the 6 credential fields from request headers, or return null if
+ *  the required Oracle fields are absent. */
+function credentialsFromHeaders(
+  headers: Record<string, string | string[] | undefined>,
+): Credentials | null {
+  const get = (h: string): string | undefined => {
+    const v = headers[h];
+    return typeof v === 'string' && v.length > 0 ? v : undefined;
+  };
+
+  const oracleUser = get('x-iqms-oracle-user');
+  const oraclePassword = get('x-iqms-oracle-password');
+  const oracleConnectString = get('x-iqms-oracle-connect-string');
+
+  if (!oracleUser || !oraclePassword || !oracleConnectString) return null;
+
+  const webapiBaseUrl = get('x-iqms-webapi-base-url');
+  const webapiUser = get('x-iqms-webapi-user');
+  const webapiPassword = get('x-iqms-webapi-password');
+
+  const webapi =
+    webapiBaseUrl && webapiUser && webapiPassword
+      ? { baseUrl: webapiBaseUrl, username: webapiUser, password: webapiPassword }
+      : null;
+
+  return {
+    oracle: { user: oracleUser, password: oraclePassword, connectString: oracleConnectString },
+    webapi,
+  };
+}
 
 function startHttpServer(): void {
   const port = parseInt(process.env.MCP_HTTP_PORT || '8080', 10);
@@ -42,46 +78,59 @@ function startHttpServer(): void {
       return;
     }
 
-    if (isGatewayMode) {
-      // Copy injected headers into env so the rest of the codebase only knows about env.
-      let credsChanged = false;
-      for (const [header, envVar] of Object.entries(HEADER_TO_ENV)) {
-        const value = req.headers[header];
-        if (typeof value === 'string' && value.length > 0 && process.env[envVar] !== value) {
-          process.env[envVar] = value;
-          credsChanged = true;
+    // SECURITY: In gateway mode we extract per-request tenant credentials from
+    // the incoming headers and pass them through AsyncLocalStorage via
+    // runWithCredentials(). This ensures every async operation spawned inside
+    // handle() — including IqmsClient pool lookups — sees the correct tenant's
+    // credentials without any process.env mutation.
+    //
+    // TRANSPORT INVARIANT: sessionIdGenerator is undefined (stateless). Each
+    // HTTP request is a self-contained lifecycle. The ALS context opened by
+    // runWithCredentials() is alive for exactly that lifecycle, so there is no
+    // risk of a stale/foreign credential context leaking to later requests.
+    // Do NOT switch to a stateful/SSE transport without re-reviewing this.
+    const handle = async () => {
+      const server = createServer();
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+        enableJsonResponse: true,
+      });
+
+      res.on('close', () => {
+        transport.close();
+        server.close();
+      });
+
+      try {
+        await server.connect(transport);
+        await transport.handleRequest(req, res);
+      } catch (err) {
+        logger.error('MCP transport error', { error: (err as Error).message });
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              error: { code: -32603, message: 'Internal error' },
+              id: null,
+            }),
+          );
         }
       }
-      if (credsChanged) resetClient();
-      // Don't reject requests without credentials — tools/list works either way.
-    }
+    };
 
-    const server = createServer();
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-      enableJsonResponse: true,
-    });
-
-    res.on('close', () => {
-      transport.close();
-      server.close();
-    });
-
-    try {
-      await server.connect(transport);
-      await transport.handleRequest(req, res);
-    } catch (err) {
-      logger.error('MCP transport error', { error: (err as Error).message });
-      if (!res.headersSent) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({
-            jsonrpc: '2.0',
-            error: { code: -32603, message: 'Internal error' },
-            id: null,
-          }),
-        );
+    if (isGatewayMode) {
+      const headerCreds = credentialsFromHeaders(req.headers as Record<string, string | string[] | undefined>);
+      if (headerCreds) {
+        // Bind request-scoped credentials; no process.env mutation occurs.
+        await runWithCredentials(headerCreds, handle);
+      } else {
+        // No credentials in headers — allow through so tools/list works
+        // unauthenticated (same behaviour as the old code).
+        await handle();
       }
+    } else {
+      await handle();
     }
   });
 

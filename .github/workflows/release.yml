@@ -18,7 +18,7 @@ jobs:
     # See: ~/.claude/skills/mcp-server-fleet-ci-template
     uses: wyre-technology/.github/.github/workflows/mcp-server-ci.yml@198605d0575e27374cf9b67fba3aa8c7b91de2c0
     with:
-      node-versions: '["18", "20", "22"]'
+      node-versions: '["20", "22"]'
     secrets: inherit
 
   release:
